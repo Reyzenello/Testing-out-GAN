@@ -1,104 +1,92 @@
 import numpy as np
-import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Dense, LeakyReLU, BatchNormalization, Reshape, Flatten, Input
-from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import Dense, Input
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
 import matplotlib.pyplot as plt
 
+# Set random seed for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
 
+# Generate real samples (a simple 1D distribution)
+def generate_real_samples(n):
+    return np.random.normal(0, 1, (n, 1)), np.ones((n, 1))
 
-def build_generator():
-    model = Sequential()
-    model.add(Dense(256, input_dim=100))
-    model.add(LeakyReLU(alpha=0.2))
-    model.add(BatchNormalization(momentum=0.8))
-    model.add(Dense(512))
-    model.add(LeakyReLU(alpha=0.2))
-    model.add(BatchNormalization(momentum=0.8))
-    model.add(Dense(1024))
-    model.add(LeakyReLU(alpha=0.2))
-    model.add(BatchNormalization(momentum=0.8))
-    model.add(Dense(28*28*1, activation='tanh'))
-    model.add(Reshape((28, 28, 1)))
+# Generate latent points as input for the generator
+def generate_latent_points(latent_dim, n):
+    return np.random.normal(0, 1, (n, latent_dim))
+
+# Define the generator model
+def define_generator(latent_dim):
+    inputs = Input(shape=(latent_dim,))
+    x = Dense(10, activation='relu')(inputs)
+    outputs = Dense(1, activation='linear')(x)
+    model = Model(inputs, outputs)
     return model
 
-def build_discriminator():
-    model = Sequential()
-    model.add(Flatten(input_shape=(28, 28, 1)))
-    model.add(Dense(512))
-    model.add(LeakyReLU(alpha=0.2))
-    model.add(Dense(256))
-    model.add(LeakyReLU(alpha=0.2))
-    model.add(Dense(1, activation='sigmoid'))
+# Define the discriminator model
+def define_discriminator():
+    inputs = Input(shape=(1,))
+    x = Dense(10, activation='relu')(inputs)
+    outputs = Dense(1, activation='sigmoid')(x)
+    model = Model(inputs, outputs)
+    model.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=0.001))
     return model
 
-
-def build_gan(generator, discriminator):
-    discriminator.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+# Define the GAN model
+def define_gan(generator, discriminator):
     discriminator.trainable = False
-    gan_input = Input(shape=(100,))
-    x = generator(gan_input)
-    gan_output = discriminator(x)
-    gan = Model(gan_input, gan_output)
-    gan.compile(loss='binary_crossentropy', optimizer='adam')
-    return gan
+    model = Model(generator.input, discriminator(generator.output))
+    model.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=0.001))
+    return model
 
-generator = build_generator()
-discriminator = build_discriminator()
-gan = build_gan(generator, discriminator)
+# Train the GAN
+def train_gan(generator, discriminator, gan, latent_dim, n_epochs=1000, n_batch=64, n_eval=100):
+    half_batch = n_batch // 2
+    
+    for i in range(n_epochs):
+        # Train discriminator
+        X_real, y_real = generate_real_samples(half_batch)
+        d_loss_real = discriminator.train_on_batch(X_real, y_real)
+        
+        X_fake = generator.predict(generate_latent_points(latent_dim, half_batch))
+        y_fake = np.zeros((half_batch, 1))
+        d_loss_fake = discriminator.train_on_batch(X_fake, y_fake)
+        
+        # Train generator
+        X_gan = generate_latent_points(latent_dim, n_batch)
+        y_gan = np.ones((n_batch, 1))
+        g_loss = gan.train_on_batch(X_gan, y_gan)
+        
+        # Evaluate progress
+        if (i+1) % n_eval == 0:
+            # Extract the first element if the losses are lists
+            d_loss_real = d_loss_real[0] if isinstance(d_loss_real, list) else d_loss_real
+            d_loss_fake = d_loss_fake[0] if isinstance(d_loss_fake, list) else d_loss_fake
+            g_loss = g_loss[0] if isinstance(g_loss, list) else g_loss
+            
+            print(f"Epoch {i+1}, D Loss Real: {d_loss_real:.3f}, D Loss Fake: {d_loss_fake:.3f}, G Loss: {g_loss:.3f}")
 
+# Set up the GAN
+latent_dim = 2
+generator = define_generator(latent_dim)
+discriminator = define_discriminator()
+gan = define_gan(generator, discriminator)
 
+# Train the GAN
+train_gan(generator, discriminator, gan, latent_dim)
 
-def train_gan(gan, generator, discriminator, epochs=10000, batch_size=128, sample_interval=1000):
-    (X_train, _), (_, _) = tf.keras.datasets.mnist.load_data()
-    X_train = X_train / 127.5 - 1.0
-    X_train = np.expand_dims(X_train, axis=3)
-    valid = np.ones((batch_size, 1))
-    fake = np.zeros((batch_size, 1))
+# Generate and plot results
+n = 1000
+X_real, _ = generate_real_samples(n)
+latent_points = generate_latent_points(latent_dim, n)
+X_fake = generator.predict(latent_points)
 
-    for epoch in range(epochs):
-        idx = np.random.randint(0, X_train.shape[0], batch_size)
-        imgs = X_train[idx]
-        noise = np.random.normal(0, 1, (batch_size, 100))
-        gen_imgs = generator.predict(noise)
-        d_loss_real = discriminator.train_on_batch(imgs, valid)
-        d_loss_fake = discriminator.train_on_batch(gen_imgs, fake)
-        d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
-        noise = np.random.normal(0, 1, (batch_size, 100))
-        g_loss = gan.train_on_batch(noise, valid)
-
-        if epoch % sample_interval == 0:
-            print(f"{epoch} [D loss: {d_loss[0]}, acc.: {100*d_loss[1]}] [G loss: {g_loss}]")
-            sample_images(generator, epoch)
-
-def sample_images(generator, epoch, image_grid_rows=4, image_grid_columns=4):
-    noise = np.random.normal(0, 1, (image_grid_rows * image_grid_columns, 100))
-    gen_imgs = generator.predict(noise)
-    gen_imgs = 0.5 * gen_imgs + 0.5
-
-    fig, axs = plt.subplots(image_grid_rows, image_grid_columns, figsize=(4, 4), sharey=True, sharex=True)
-    cnt = 0
-    for i in range(image_grid_rows):
-        for j in range(image_grid_columns):
-            axs[i, j].imshow(gen_imgs[cnt, :, :, 0], cmap='gray')
-            axs[i, j].axis('off')
-            cnt += 1
-    plt.show()
-
-train_gan(gan, generator, discriminator)
-
-
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report, accuracy_score
-
-# Assume `synthetic_data` is your generated synthetic data
-# and `synthetic_labels` are the corresponding labels
-X_train, X_test, y_train, y_test = train_test_split(synthetic_data, synthetic_labels, test_size=0.3, random_state=42)
-
-model = LogisticRegression()
-model.fit(X_train, y_train)
-
-y_pred = model.predict(X_test)
-print("Accuracy:", accuracy_score(y_test, y_pred))
-print("Classification Report:\n", classification_report(y_test, y_pred))
+plt.hist(X_real, bins=50, alpha=0.5, label='Real')
+plt.hist(X_fake, bins=50, alpha=0.5, label='Generated')
+plt.legend()
+plt.title('Real vs Generated Data Distribution')
+plt.xlabel('Value')
+plt.ylabel('Frequency')
+plt.show()
